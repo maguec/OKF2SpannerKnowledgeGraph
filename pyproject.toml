@@ -1,0 +1,28 @@
+[project]
+name = "okf2spannerknowledgegraph"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.141.1",
+    "google-cloud-spanner>=3.71.0",
+    "okf-core",
+    "pydantic>=2.13.5",
+    "python-dotenv>=1.2.3",
+    "python-multipart>=0.0.32",
+    "uvicorn>=0.53.0",
+]
+
+[tool.uv.sources]
+okf-core = { git = "https://github.com/xchewtoyx/okf-core" }
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
