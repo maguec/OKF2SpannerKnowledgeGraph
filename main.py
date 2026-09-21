@@ -35,6 +35,66 @@ class IngestResponse(BaseModel):
     findings: list[str]
 
 
+class SearchRequest(BaseModel):
+    search_string: str = Field(..., min_length=1, description="Search query string for both full text and vector search")
+    label: str | None = Field(None, description="Optional node label filter (e.g. Architecture, Methodology, Concept, Tag, Source)")
+    tag: str | None = Field(None, description="Optional single tag filter")
+    tags: list[str] | str | None = Field(None, description="Optional tag or list of tags to filter by")
+    limit: int = Field(10, description="Max results per search method", ge=1, le=100)
+
+    def get_effective_tags(self) -> list[str]:
+        result: list[str] = []
+        if isinstance(self.tags, list):
+            for t in self.tags:
+                if t and str(t).strip():
+                    result.append(str(t).strip())
+        elif isinstance(self.tags, str) and self.tags.strip():
+            for t in self.tags.split(","):
+                if t.strip():
+                    result.append(t.strip())
+        if self.tag and self.tag.strip() and self.tag.strip() not in result:
+            result.append(self.tag.strip())
+        return result
+
+
+class SearchNodeResult(BaseModel):
+    id: str
+    label: str
+    concept_id: str = ""
+    name: str = ""
+    description: str = ""
+    contributor: dict[str, Any] | str = Field(default_factory=dict)
+    sources: list[Any] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    score: float = Field(..., description="Hybrid re-ranked relevance score (0.0 to 1.0)")
+    rank: int = Field(..., description="Final 1-based re-ranked position")
+    matched_by: list[str] = Field(default_factory=list, description="Search methods that matched ('vector', 'fulltext')")
+    vector_distance: float | None = Field(None, description="Cosine distance from ScaNN vector search (lower is closer)")
+    fts_score: float | None = Field(None, description="Full-text relevance score")
+
+
+class SearchMethodResult(BaseModel):
+    id: str
+    label: str
+    concept_id: str = ""
+    name: str = ""
+    description: str = ""
+    contributor: dict[str, Any] | str = Field(default_factory=dict)
+    sources: list[Any] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    distance: float | None = None
+    fts_score: float | None = None
+
+
+class SearchResponse(BaseModel):
+    search_string: str
+    label: str = ""
+    tags: list[str] = Field(default_factory=list)
+    total_results: int
+    rerank_algorithm: str = "reciprocal_rank_fusion_hybrid"
+    results: list[SearchNodeResult]
+
+
 @app.get("/")
 def read_root():
     return {
@@ -55,7 +115,12 @@ def read_root():
             "tags": "HAS_TAGS -> Tag",
             "references": "HAS_REFERENCE -> Source",
             "links": "HAS_LINKS -> Concept/Node",
-        }
+        },
+        "search_endpoints": {
+            "unified_search": "POST /search (JSON body: search_string, optional label, optional tags/tag, limit)",
+            "fulltext_search": "GET /search/fulltext (Query params: q, optional label, optional tags/tag, limit)",
+            "vector_search": "GET /search/vector (Query params: q, optional label, optional tags/tag, limit)",
+        },
     }
 
 
@@ -227,26 +292,81 @@ def get_edge_labels():
         raise HTTPException(status_code=500, detail=f"Failed to fetch edge labels: {str(e)}")
 
 
+@app.post("/search", response_model=SearchResponse)
+def search_unified_endpoint(payload: SearchRequest):
+    """
+    Unified search endpoint that runs both Spanner Full-Text Search (SEARCH)
+    and ScaNN Vector Search (COSINE_DISTANCE) across Gemini embeddings.
+    Accepts JSON body with `search_string`, optional `label`, optional `tags` / `tag`, and optional `limit`.
+    """
+    try:
+        effective_tags = payload.get_effective_tags()
+        return spanner_service.search_unified(
+            search_string=payload.search_string,
+            label=payload.label,
+            tags=effective_tags,
+            limit=payload.limit,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+
 @app.get("/search/fulltext")
-def search_full_text(q: str = Query(..., description="Search keyword query"), limit: int = 10):
+def search_full_text(
+    q: str = Query(..., description="Search keyword query"),
+    label: str | None = Query(None, description="Optional node label filter"),
+    tag: str | None = Query(None, description="Optional single tag filter"),
+    tags: list[str] | None = Query(None, description="Optional list of tags to filter by"),
+    limit: int = 10,
+):
     """
     Perform Full Text Search on property body using Spanner GraphNodeSearchIndex.
     """
+    effective_tags: list[str] = []
+    if tags:
+        effective_tags.extend(tags)
+    if tag and tag not in effective_tags:
+        effective_tags.append(tag)
+
     try:
-        results = spanner_service.search_full_text(query=q, limit=limit)
-        return {"query": q, "count": len(results), "results": results}
+        results = spanner_service.search_full_text(query=q, label=label, tags=effective_tags, limit=limit)
+        return {
+            "query": q,
+            "label": label or "",
+            "tags": effective_tags,
+            "count": len(results),
+            "results": results,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Full Text Search failed: {str(e)}")
 
 
 @app.get("/search/vector")
-def search_vector(q: str = Query(..., description="Query text for vector similarity search"), limit: int = 10):
+def search_vector(
+    q: str = Query(..., description="Query text for vector similarity search"),
+    label: str | None = Query(None, description="Optional node label filter"),
+    tag: str | None = Query(None, description="Optional single tag filter"),
+    tags: list[str] | None = Query(None, description="Optional list of tags to filter by"),
+    limit: int = 10,
+):
     """
     Perform Vector Similarity Search using Gemini text-embedding-004 and Spanner ScaNN GraphNodeVectorIndex.
     """
+    effective_tags: list[str] = []
+    if tags:
+        effective_tags.extend(tags)
+    if tag and tag not in effective_tags:
+        effective_tags.append(tag)
+
     try:
-        results = spanner_service.search_vector(query_text=q, limit=limit)
-        return {"query": q, "count": len(results), "results": results}
+        results = spanner_service.search_vector(query_text=q, label=label, tags=effective_tags, limit=limit)
+        return {
+            "query": q,
+            "label": label or "",
+            "tags": effective_tags,
+            "count": len(results),
+            "results": results,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Vector Search failed: {str(e)}")
 

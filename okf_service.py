@@ -161,6 +161,8 @@ def parse_and_validate_okf_content(
         "body": doc.body or "",
         "author": default_author,
         "drive_url": default_url,
+        "contributor": frontmatter.get("contributor") or {},
+        "sources": raw_sources or [],
         "status": status,
         "frontmatter": frontmatter,
     })
