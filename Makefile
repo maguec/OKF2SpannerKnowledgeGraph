@@ -40,6 +40,11 @@ dbdestroy: ## DANGER: Drops the database - do not use if you are not 100% sure
 dbschema: ## Apply or update database schema from DDL.sql
 	@gcloud spanner databases ddl update $(GOOGLE_SPANNER_DATABASE) --instance $(GOOGLE_SPANNER_INSTANCE) --ddl-file=DDL.sql
 
+spanner-cli: ## Connect to Spanner database using spanner-cli
+	@spanner-cli sql --project=$(GOOGLE_PROJECT) --instance=$(GOOGLE_SPANNER_INSTANCE) --database=$(GOOGLE_SPANNER_DATABASE)
+
+cli: spanner-cli ## Alias for spanner-cli
+
 dbload: check_uv ## Load LEI data into Spanner database using uv
 	@uv run load_spanner.py --instance-id $(GOOGLE_SPANNER_INSTANCE) --database-id $(GOOGLE_SPANNER_DATABASE) --project-id $(GOOGLE_PROJECT)
 
