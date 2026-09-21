@@ -1,10 +1,12 @@
+import hashlib
+import json
 import uuid
 import pytest
 from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
 from main import app
-from okf_service import parse_and_validate_okf_content, string_to_uuidv4
+from okf_service import parse_and_validate_okf_content, string_to_uuidv4, md5_to_uuid
 
 client = TestClient(app)
 
@@ -48,6 +50,27 @@ def test_string_to_uuidv4():
     assert val.version == 4
     assert id1 == id2  # Deterministic match
     assert id1 != id3
+
+
+def test_md5_to_uuid():
+    sample = "test content for md5"
+    u = md5_to_uuid(sample)
+    assert len(u) == 36
+    parsed = uuid.UUID(u)
+    assert parsed.hex == hashlib.md5(sample.encode("utf-8")).hexdigest()
+    # Deterministic
+    assert md5_to_uuid(sample) == u
+
+
+def test_parse_and_validate_okf_content_with_custom_uuid():
+    custom_uuid = "1aecf31e-3a61-280c-0ae0-e5d38ebc51dd"
+    res = parse_and_validate_okf_content(SAMPLE_VALID_OKF_1, node_id=custom_uuid)
+    assert res["valid"] is True
+    assert res["node"]["id"] == custom_uuid
+    assert res["node"]["properties"]["id"] == "concept-ai"
+    # Source edge should also carry this source uuid
+    for e in res["edges"]:
+        assert e["id"] == custom_uuid
 
 
 def test_parse_and_validate_okf_content_valid():
@@ -110,6 +133,37 @@ def test_ingest_files_endpoint(mock_upsert):
     json_data = response.json()
     assert json_data["success"] is True
     assert json_data["nodes_inserted"] == 2
+
+
+@patch("main.spanner_service.upsert_graph")
+def test_ingest_endpoint_with_custom_uuid(mock_upsert):
+    mock_upsert.return_value = {"nodes_count": 1, "edges_count": 2}
+    custom_uuid = "1aecf31e-3a61-280c-0ae0-e5d38ebc51dd"
+
+    response = client.post(
+        "/okf/ingest",
+        json={"id": custom_uuid, "content": SAMPLE_VALID_OKF_1},
+    )
+    assert response.status_code == 200
+    json_data = response.json()
+    assert json_data["success"] is True
+    assert json_data["nodes"][0]["id"] == custom_uuid
+
+
+@patch("main.spanner_service.upsert_graph")
+def test_ingest_files_endpoint_with_json(mock_upsert):
+    mock_upsert.return_value = {"nodes_count": 1, "edges_count": 2}
+    custom_uuid = "2c8d486a-e964-864d-aaae-2cfe564ba3c3"
+    json_doc = json.dumps({"id": custom_uuid, "content": SAMPLE_VALID_OKF_1})
+
+    files = [
+        ("files", ("concept_ai.json", json_doc, "application/json")),
+    ]
+    response = client.post("/okf/ingest-files", files=files)
+    assert response.status_code == 200
+    json_data = response.json()
+    assert json_data["success"] is True
+    assert json_data["nodes"][0]["id"] == custom_uuid
 
 
 @patch("main.spanner_service.fetch_node_labels")

@@ -5,6 +5,10 @@ from google.cloud import spanner
 from embedding_service import generate_text_embedding
 
 
+# Disable Spanner built-in metrics exporter by default to avoid missing label errors in Cloud Monitoring
+os.environ.setdefault("SPANNER_DISABLE_BUILTIN_METRICS", "true")
+
+
 class SpannerGraphService:
     def __init__(
         self,
@@ -25,7 +29,11 @@ class SpannerGraphService:
                 raise ValueError(
                     "Missing Spanner environment configuration (GOOGLE_PROJECT, GOOGLE_SPANNER_INSTANCE, GOOGLE_SPANNER_DATABASE)"
                 )
-            self._client = spanner.Client(project=self.project_id)
+            disable_metrics = os.getenv("SPANNER_DISABLE_BUILTIN_METRICS", "true").lower() in ("true", "1")
+            self._client = spanner.Client(
+                project=self.project_id,
+                disable_builtin_metrics=disable_metrics,
+            )
             instance = self._client.instance(self.instance_id)
             self._database = instance.database(self.database_id)
         return self._database
@@ -36,14 +44,43 @@ class SpannerGraphService:
         """
         Upserts nodes and edges into GraphNode and GraphEdge tables in Spanner.
         Generates and writes 768-dimensional Gemini vector embeddings for each node.
+        Ensures nodes and edges are deduplicated and removes any invalid/null Tag nodes.
         """
         db = self.get_database()
 
+        # Deduplicate nodes by unique id
+        unique_nodes: dict[str, dict[str, Any]] = {}
+        for n in nodes:
+            if n and n.get("id"):
+                unique_nodes[n["id"]] = n
+        deduped_nodes = list(unique_nodes.values())
+
+        # Deduplicate edges by (id, dest_id, edge_id)
+        unique_edges: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for e in edges:
+            if e and e.get("id") and e.get("dest_id") and e.get("edge_id"):
+                unique_edges[(e["id"], e["dest_id"], e["edge_id"])] = e
+        deduped_edges = list(unique_edges.values())
+
         def _transaction_work(transaction):
+            # Clean up any previously stored null/invalid Tag nodes or edges
+            try:
+                transaction.execute_update(
+                    "DELETE FROM GraphEdge WHERE dest_id IN "
+                    "(SELECT id FROM GraphNode WHERE label = 'Tag' AND "
+                    "(JSON_VALUE(properties, '$.tag') IS NULL OR JSON_VALUE(properties, '$.tag') = 'null' OR JSON_VALUE(properties, '$.tag') = '' OR JSON_VALUE(properties, '$.tag') = 'none'))"
+                )
+                transaction.execute_update(
+                    "DELETE FROM GraphNode WHERE label = 'Tag' AND "
+                    "(JSON_VALUE(properties, '$.tag') IS NULL OR JSON_VALUE(properties, '$.tag') = 'null' OR JSON_VALUE(properties, '$.tag') = '' OR JSON_VALUE(properties, '$.tag') = 'none')"
+                )
+            except Exception:
+                pass
+
             # Upsert nodes first (since edges interleave in GraphNode)
             node_columns = ["id", "label", "properties", "embedding"]
             node_values = []
-            for n in nodes:
+            for n in deduped_nodes:
                 props_dict = n["properties"] if isinstance(n["properties"], dict) else {}
                 props_val = json.dumps(props_dict) if isinstance(n["properties"], dict) else n["properties"]
                 
@@ -86,7 +123,7 @@ class SpannerGraphService:
                 )
 
         db.run_in_transaction(_transaction_work)
-        return {"nodes_count": len(nodes), "edges_count": len(edges)}
+        return {"nodes_count": len(deduped_nodes), "edges_count": len(deduped_edges)}
 
     def search_full_text(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
         """

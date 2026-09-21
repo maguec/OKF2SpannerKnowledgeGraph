@@ -19,8 +19,7 @@ Query all directed links between concept nodes.
 
 ```sql
 GRAPH OKFGraph
-MATCH (source)-[e]->(target)
-WHERE e.label = 'HAS_LINKS'
+MATCH (source)-[e:HAS_LINKS]->(target)
 RETURN 
   JSON_VALUE(source.properties, '$.id') AS source_concept,
   e.label AS relationship,
@@ -36,8 +35,8 @@ Find all `Tag` nodes linked to a specific concept.
 
 ```sql
 GRAPH OKFGraph
-MATCH (c)-[e]->(t)
-WHERE JSON_VALUE(c.properties, '$.id') = 'methodologies/how_to_use_memorystore' AND e.label = 'HAS_TAGS'
+MATCH (c)-[e:HAS_TAGS]->(t:Tag)
+WHERE JSON_VALUE(c.properties, '$.id') = 'methodologies/how_to_use_memorystore'
 RETURN 
   JSON_VALUE(c.properties, '$.name') AS concept_name,
   e.label AS relationship,
@@ -52,8 +51,7 @@ Find all `Source` reference documents linked to a concept.
 
 ```sql
 GRAPH OKFGraph
-MATCH (c)-[e]->(s)
-WHERE e.label = 'HAS_REFERENCE'
+MATCH (c)-[e:HAS_REFERENCE]->(s:Source)
 RETURN 
   JSON_VALUE(c.properties, '$.id') AS concept_id,
   JSON_VALUE(s.properties, '$.name') AS source_title,

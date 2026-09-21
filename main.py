@@ -1,10 +1,11 @@
+import json
 import os
 from typing import Any
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Body, Query
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
-from okf_service import parse_and_validate_okf_content
+from okf_service import parse_and_validate_okf_content, md5_to_uuid
 from spanner_service import SpannerGraphService
 
 # Load environment variables from .env if present
@@ -20,6 +21,7 @@ spanner_service = SpannerGraphService()
 
 
 class OKFDocumentPayload(BaseModel):
+    id: str | None = Field(None, description="Optional pre-generated UUID for the document (e.g. from file MD5)")
     content: str = Field(..., description="Raw OKF markdown document content")
     default_id: str | None = Field(None, description="Optional default concept ID if omitted in frontmatter")
 
@@ -74,7 +76,8 @@ def validate_okf(payload: OKFDocumentPayload):
     """
     Validate OKF v2 document syntax, schema, and links.
     """
-    res = parse_and_validate_okf_content(payload.content, default_id=payload.default_id)
+    node_id = payload.id or md5_to_uuid(payload.content)
+    res = parse_and_validate_okf_content(payload.content, default_id=payload.default_id, node_id=node_id)
     return res
 
 
@@ -82,8 +85,10 @@ def validate_okf(payload: OKFDocumentPayload):
 def ingest_okf(payload: OKFDocumentPayload):
     """
     Parses a single OKF v2 document and populates Spanner GraphNode and GraphEdge with Gemini embeddings.
+    Uses the provided UUID (from MD5 or caller) instead of creating one from concept ID.
     """
-    res = parse_and_validate_okf_content(payload.content, default_id=payload.default_id)
+    node_id = payload.id or md5_to_uuid(payload.content)
+    res = parse_and_validate_okf_content(payload.content, default_id=payload.default_id, node_id=node_id)
     if not res["valid"]:
         raise HTTPException(
             status_code=400,
@@ -117,21 +122,53 @@ def ingest_okf(payload: OKFDocumentPayload):
 @app.post("/okf/ingest-files", response_model=IngestResponse)
 async def ingest_okf_files(files: list[UploadFile] = File(...)):
     """
-    Upload multiple OKF v2 markdown files, parse, validate, and populate Spanner Graph.
+    Upload multiple OKF v2 JSON or markdown files, parse, validate, and populate Spanner Graph.
+    Uses pre-generated file UUIDs on ingestion.
     """
-    all_nodes = []
-    all_edges = []
-    all_findings = []
+    file_records = []
     failed_files = []
+    concept_to_id_map: dict[str, str] = {}
 
     for file in files:
         content_bytes = await file.read()
-        content = content_bytes.decode("utf-8", errors="replace")
-        default_id = file.filename.removesuffix(".md") if file.filename else None
+        filename = file.filename or "doc"
+        if filename.endswith(".json"):
+            try:
+                data = json.loads(content_bytes.decode("utf-8"))
+                doc_content = data.get("content", "")
+                doc_id = data.get("id") or md5_to_uuid(content_bytes)
+                default_id = filename.removesuffix(".json")
+            except Exception as e:
+                failed_files.append({"filename": filename, "findings": [f"Invalid JSON: {str(e)}"]})
+                continue
+        else:
+            doc_content = content_bytes.decode("utf-8", errors="replace")
+            doc_id = md5_to_uuid(content_bytes)
+            default_id = filename.removesuffix(".md")
 
-        res = parse_and_validate_okf_content(content, default_id=default_id)
+        concept_to_id_map[default_id] = doc_id
+        concept_to_id_map[default_id.replace("_", "/")] = doc_id
+
+        file_records.append({
+            "filename": filename,
+            "content": doc_content,
+            "default_id": default_id,
+            "node_id": doc_id,
+        })
+
+    all_nodes = []
+    all_edges = []
+    all_findings = []
+
+    for item in file_records:
+        res = parse_and_validate_okf_content(
+            content=item["content"],
+            default_id=item["default_id"],
+            node_id=item["node_id"],
+            concept_to_id_map=concept_to_id_map,
+        )
         if not res["valid"]:
-            failed_files.append({"filename": file.filename, "findings": res["findings"]})
+            failed_files.append({"filename": item["filename"], "findings": res["findings"]})
         else:
             if res.get("nodes"):
                 all_nodes.extend(res["nodes"])

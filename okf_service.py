@@ -24,12 +24,62 @@ def string_to_uuidv4(str_id: str) -> str:
     return str(uuid.UUID(bytes=bytes(b)))
 
 
+def md5_to_uuid(content: str | bytes) -> str:
+    """
+    Takes file content (str or bytes), computes its MD5 checksum,
+    and formats it as a standard 36-character UUID string.
+    """
+    if isinstance(content, str):
+        content_bytes = content.encode("utf-8")
+    else:
+        content_bytes = content
+    md5_digest = hashlib.md5(content_bytes).digest()
+    return str(uuid.UUID(bytes=md5_digest))
+
+
+def sanitize_properties(data: dict[str, Any]) -> dict[str, Any]:
+    """
+    Recursively sanitizes a dictionary of properties to ensure no null / None values exist.
+    None values become empty strings "" or empty lists/dicts.
+    Strings matching 'null' or 'none' (case-insensitive) for tags or identifiers are filtered.
+    """
+    if not isinstance(data, dict):
+        return {}
+    cleaned = {}
+    for k, v in data.items():
+        if v is None:
+            cleaned[k] = ""
+        elif isinstance(v, dict):
+            cleaned[k] = sanitize_properties(v)
+        elif isinstance(v, list):
+            cleaned_list = []
+            for item in v:
+                if item is None:
+                    continue
+                if isinstance(item, str) and item.strip().lower() in ("null", "none", "~", "undefined"):
+                    continue
+                if isinstance(item, dict):
+                    cleaned_list.append(sanitize_properties(item))
+                else:
+                    cleaned_list.append(item)
+            cleaned[k] = cleaned_list
+        elif isinstance(v, str):
+            cleaned[k] = v.strip()
+        else:
+            cleaned[k] = v
+    return cleaned
+
+
 def parse_and_validate_okf_content(
-    content: str, default_id: str | None = None
+    content: str,
+    default_id: str | None = None,
+    node_id: str | None = None,
+    concept_to_id_map: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """
     Parses OKF content, validates it, and extracts graph node and edge details.
     Includes Tag nodes (HAS_TAGS), Source nodes (HAS_REFERENCE), and Markdown links (HAS_LINKS).
+    Ensures all node and edge properties are populated without null values.
     """
     try:
         doc: ConceptDocument = okf_core.parse_concept_document(content)
@@ -64,20 +114,56 @@ def parse_and_validate_okf_content(
     )
     node_label = str(frontmatter.get("label", frontmatter.get("type", "Concept")))
     node_name = str(frontmatter.get("title", frontmatter.get("name", concept_id)))
-    description = str(frontmatter.get("description", ""))
+    description = str(frontmatter.get("description") or "")
+    status = str(frontmatter.get("status") or "stable")
 
-    # Primary concept node UUIDv4
-    uuidv4_node_id = string_to_uuidv4(concept_id)
+    # Primary concept node UUID (use provided node_id if passed, otherwise derive from concept_id)
+    if node_id:
+        uuidv4_node_id = string_to_uuidv4(node_id)
+    else:
+        uuidv4_node_id = string_to_uuidv4(concept_id)
 
-    # Properties for Spanner GraphNode
-    node_properties = {
+    # Process and sanitize Tags (HAS_TAGS relationship)
+    raw_tags = frontmatter.get("tags") or []
+    if isinstance(raw_tags, str):
+        raw_tags = [raw_tags]
+
+    valid_tags: list[str] = []
+    for tag_val in raw_tags:
+        if not tag_val or not isinstance(tag_val, str):
+            continue
+        cleaned_tag = tag_val.strip()
+        if not cleaned_tag or cleaned_tag.lower() in ("null", "none", "~", "undefined"):
+            continue
+        valid_tags.append(cleaned_tag)
+
+    primary_tag = valid_tags[0] if valid_tags else node_label.lower()
+
+    # Process Sources info for default author/drive_url
+    raw_sources = frontmatter.get("sources") or []
+    default_author = ""
+    default_url = ""
+    if isinstance(raw_sources, list) and raw_sources:
+        first_src = raw_sources[0]
+        if isinstance(first_src, dict):
+            default_author = str(first_src.get("author") or "")
+            default_url = str(first_src.get("drive_url") or "")
+
+    # Properties for Spanner GraphNode - guaranteed non-null
+    node_properties = sanitize_properties({
         "id": concept_id,
         "name": node_name,
+        "title": node_name,
         "type": node_label,
-        "description": description,
+        "tag": primary_tag,
+        "tags": valid_tags,
+        "description": description or node_name,
+        "body": doc.body or "",
+        "author": default_author,
+        "drive_url": default_url,
+        "status": status,
         "frontmatter": frontmatter,
-        "body": doc.body,
-    }
+    })
 
     concept_node = {
         "id": uuidv4_node_id,
@@ -88,27 +174,27 @@ def parse_and_validate_okf_content(
     all_nodes = [concept_node]
     edges = []
 
-    # Process Tags (HAS_TAGS relationship)
-    raw_tags = frontmatter.get("tags", [])
-    if isinstance(raw_tags, str):
-        raw_tags = [raw_tags]
-
-    for tag_val in raw_tags:
-        if not tag_val or not isinstance(tag_val, str):
-            continue
-        tag_name = tag_val.strip()
+    for tag_name in valid_tags:
         tag_concept_id = f"tag:{tag_name}"
         tag_uuid = string_to_uuidv4(tag_concept_id)
 
         all_nodes.append({
             "id": tag_uuid,
             "label": "Tag",
-            "properties": {
+            "properties": sanitize_properties({
                 "id": tag_concept_id,
                 "name": tag_name,
+                "title": tag_name,
                 "type": "Tag",
                 "tag": tag_name,
-            },
+                "tags": [tag_name],
+                "description": f"Tag: {tag_name}",
+                "body": f"Tag: {tag_name}",
+                "author": "",
+                "drive_url": "",
+                "status": "active",
+                "frontmatter": {"id": tag_concept_id, "name": tag_name, "tag": tag_name, "type": "Tag"},
+            }),
         })
 
         edges.append({
@@ -116,15 +202,20 @@ def parse_and_validate_okf_content(
             "dest_id": tag_uuid,
             "edge_id": string_to_uuidv4(f"{concept_id}->tag:{tag_name}"),
             "label": "HAS_TAGS",
-            "properties": {
+            "properties": sanitize_properties({
                 "source_id": concept_id,
                 "dest_id": tag_concept_id,
                 "tag": tag_name,
-            },
+                "title": tag_name,
+                "name": tag_name,
+                "text": tag_name,
+                "type": "HAS_TAGS",
+                "author": "",
+                "drive_url": "",
+            }),
         })
 
     # Process Sources (HAS_REFERENCE relationship)
-    raw_sources = frontmatter.get("sources", [])
     if isinstance(raw_sources, list):
         for idx, src_obj in enumerate(raw_sources):
             if not isinstance(src_obj, dict):
@@ -139,13 +230,20 @@ def parse_and_validate_okf_content(
             all_nodes.append({
                 "id": src_uuid,
                 "label": "Source",
-                "properties": {
+                "properties": sanitize_properties({
                     "id": src_concept_id,
                     "name": src_title,
+                    "title": src_title,
                     "type": "Source",
+                    "tag": "source",
+                    "tags": ["source"],
+                    "description": f"Source document: {src_title}",
+                    "body": f"Source document: {src_title} by {src_author}",
                     "author": src_author,
                     "drive_url": src_url,
-                },
+                    "status": "reference",
+                    "frontmatter": {"id": src_concept_id, "title": src_title, "author": src_author, "drive_url": src_url, "type": "Source"},
+                }),
             })
 
             edges.append({
@@ -153,13 +251,17 @@ def parse_and_validate_okf_content(
                 "dest_id": src_uuid,
                 "edge_id": string_to_uuidv4(f"{concept_id}->source:{src_raw_id}"),
                 "label": "HAS_REFERENCE",
-                "properties": {
+                "properties": sanitize_properties({
                     "source_id": concept_id,
                     "dest_id": src_concept_id,
+                    "tag": "source",
+                    "name": src_title,
                     "title": src_title,
+                    "text": src_title,
+                    "type": "HAS_REFERENCE",
                     "author": src_author,
                     "drive_url": src_url,
-                },
+                }),
             })
 
     # Extract Markdown links using okf_core
@@ -171,6 +273,15 @@ def parse_and_validate_okf_content(
 
     edge_idx = 0
 
+    def _resolve_dest_id(tgt_id: str) -> str:
+        if concept_to_id_map:
+            if tgt_id in concept_to_id_map:
+                return concept_to_id_map[tgt_id]
+            norm_tgt = tgt_id.replace("/", "_")
+            if norm_tgt in concept_to_id_map:
+                return concept_to_id_map[norm_tgt]
+        return string_to_uuidv4(tgt_id)
+
     # Process markdown links (HAS_LINKS relationship)
     for md_link in extracted_md_links:
         target = md_link.target
@@ -179,7 +290,7 @@ def parse_and_validate_okf_content(
             continue
         # Clean target path/extension if present
         target_id = target.removesuffix(".md").strip("/")
-        dest_uuidv4_id = string_to_uuidv4(target_id)
+        dest_uuidv4_id = _resolve_dest_id(target_id)
         edge_idx += 1
         edge_uuidv4_id = string_to_uuidv4(f"{concept_id}->{target_id}:{edge_idx}")
 
@@ -188,19 +299,24 @@ def parse_and_validate_okf_content(
             "dest_id": dest_uuidv4_id,
             "edge_id": edge_uuidv4_id,
             "label": "HAS_LINKS",
-            "properties": {
+            "properties": sanitize_properties({
                 "source_id": concept_id,
                 "dest_id": target_id,
-                "text": md_link.text or "",
+                "tag": "link",
+                "title": md_link.text or target_id,
+                "name": md_link.text or target_id,
+                "text": md_link.text or target_id,
                 "type": "markdown_link",
-            },
+                "author": "",
+                "drive_url": "",
+            }),
         })
 
     # Process wiki links (HAS_LINKS relationship)
     for match in wiki_matches:
         target_id = match[0].strip().removesuffix(".md")
         link_label = match[1].strip() if match[1] else target_id
-        dest_uuidv4_id = string_to_uuidv4(target_id)
+        dest_uuidv4_id = _resolve_dest_id(target_id)
         edge_idx += 1
         edge_uuidv4_id = string_to_uuidv4(f"{concept_id}->{target_id}:{edge_idx}")
 
@@ -209,12 +325,17 @@ def parse_and_validate_okf_content(
             "dest_id": dest_uuidv4_id,
             "edge_id": edge_uuidv4_id,
             "label": "HAS_LINKS",
-            "properties": {
+            "properties": sanitize_properties({
                 "source_id": concept_id,
                 "dest_id": target_id,
+                "tag": "link",
+                "title": link_label,
+                "name": link_label,
                 "text": link_label,
                 "type": "wiki_link",
-            },
+                "author": "",
+                "drive_url": "",
+            }),
         })
 
     is_valid = len(error_findings) == 0

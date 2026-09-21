@@ -45,17 +45,15 @@ spanner-cli: ## Connect to Spanner database using spanner-cli
 
 cli: spanner-cli ## Alias for spanner-cli
 
-dbload: check_uv ## Load LEI data into Spanner database using uv
-	@uv run load_spanner.py --instance-id $(GOOGLE_SPANNER_INSTANCE) --database-id $(GOOGLE_SPANNER_DATABASE) --project-id $(GOOGLE_PROJECT)
+dbload: check_uv ## Load OKF data into Spanner database using uv
+	@uv run python sample_ingest.py --instance-id $(GOOGLE_SPANNER_INSTANCE) --database-id $(GOOGLE_SPANNER_DATABASE) --project-id $(GOOGLE_PROJECT)
 
-dbload-dryrun: check_uv ## Test data parsing, geocoding, and S2 token generation in dry-run mode
-	@uv run load_spanner.py --dry-run
+dbload-dryrun: check_uv ## Test OKF data parsing and graph validation in dry-run mode
+	@uv run python sample_ingest.py --dry-run
 
-dbload-rr: check_uv ## Load entity relationships (RR) into Spanner database using uv
-	@uv run --no-sync load_relationships.py --instance-id $(GOOGLE_SPANNER_INSTANCE) --database-id $(GOOGLE_SPANNER_DATABASE) --project-id $(GOOGLE_PROJECT)
+dbload-rr: dbload ## Alias for dbload (OKF loads concepts and relationship edges together)
 
-dbload-rr-dryrun: check_uv ## Test relationship data parsing in dry-run mode
-	@uv run --no-sync load_relationships.py --dry-run
+dbload-rr-dryrun: dbload-dryrun ## Alias for dbload-dryrun
 
 instancecreate: ## Spin up a single node Spanner instance
 	@gcloud spanner instances create $(GOOGLE_SPANNER_INSTANCE) --description="$(GOOGLE_SPANNER_INSTANCE) Graph Database" --config=regional-$(GOOGLE_CLOUD_REGION) --edition=ENTERPRISE --default-backup-schedule-type=NONE --nodes=1
