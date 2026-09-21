@@ -1,6 +1,6 @@
 import os
 from typing import Any
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Body
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Body, Query
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
@@ -12,8 +12,8 @@ load_dotenv()
 
 app = FastAPI(
     title="OKF v2 to Spanner Knowledge Graph API",
-    description="FastAPI service for parsing valid OKF v2 files and populating a Spanner Graph Database.",
-    version="0.1.0",
+    description="FastAPI service for parsing valid OKF v2 files, populating Spanner Graph, Full Text Search, and ScaNN Vector Search.",
+    version="0.2.0",
 )
 
 spanner_service = SpannerGraphService()
@@ -44,6 +44,11 @@ def read_root():
             "database_id": os.getenv("GOOGLE_SPANNER_DATABASE"),
             "region": os.getenv("GOOGLE_CLOUD_REGION"),
         },
+        "indexes": {
+            "fts_index": "GraphNodeSearchIndex",
+            "vector_index": "GraphNodeVectorIndex (ScaNN)",
+            "embedding_model": "text-embedding-004 (768-dim)",
+        }
     }
 
 
@@ -71,7 +76,7 @@ def validate_okf(payload: OKFDocumentPayload):
 @app.post("/okf/ingest", response_model=IngestResponse)
 def ingest_okf(payload: OKFDocumentPayload):
     """
-    Parses a single OKF v2 document and populates Spanner GraphNode and GraphEdge.
+    Parses a single OKF v2 document and populates Spanner GraphNode and GraphEdge with Gemini embeddings.
     """
     res = parse_and_validate_okf_content(payload.content, default_id=payload.default_id)
     if not res["valid"]:
@@ -107,7 +112,7 @@ def ingest_okf(payload: OKFDocumentPayload):
 @app.post("/okf/ingest-files", response_model=IngestResponse)
 async def ingest_okf_files(files: list[UploadFile] = File(...)):
     """
-    Upload multiple OKF v2 markdown files, parse, validate, and populate Spanner Graph.
+    Upload multiple OKF v2 markdown files, parse, validate, and populate Spanner Graph with Gemini embeddings.
     """
     all_nodes = []
     all_edges = []
@@ -176,6 +181,30 @@ def get_edge_labels():
         return spanner_service.fetch_edge_labels()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch edge labels: {str(e)}")
+
+
+@app.get("/search/fulltext")
+def search_full_text(q: str = Query(..., description="Search keyword query"), limit: int = 10):
+    """
+    Perform Full Text Search on property body using Spanner GraphNodeSearchIndex.
+    """
+    try:
+        results = spanner_service.search_full_text(query=q, limit=limit)
+        return {"query": q, "count": len(results), "results": results}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Full Text Search failed: {str(e)}")
+
+
+@app.get("/search/vector")
+def search_vector(q: str = Query(..., description="Query text for vector similarity search"), limit: int = 10):
+    """
+    Perform Vector Similarity Search using Gemini text-embedding-004 and Spanner ScaNN GraphNodeVectorIndex.
+    """
+    try:
+        results = spanner_service.search_vector(query_text=q, limit=limit)
+        return {"query": q, "count": len(results), "results": results}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Vector Search failed: {str(e)}")
 
 
 if __name__ == "__main__":

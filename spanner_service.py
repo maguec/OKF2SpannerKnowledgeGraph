@@ -2,6 +2,7 @@ import json
 import os
 from typing import Any
 from google.cloud import spanner
+from embedding_service import generate_text_embedding
 
 
 class SpannerGraphService:
@@ -34,16 +35,23 @@ class SpannerGraphService:
     ) -> dict[str, int]:
         """
         Upserts nodes and edges into GraphNode and GraphEdge tables in Spanner.
+        Generates and writes 768-dimensional Gemini vector embeddings for each node.
         """
         db = self.get_database()
 
         def _transaction_work(transaction):
             # Upsert nodes first (since edges interleave in GraphNode)
-            node_columns = ["id", "label", "properties"]
+            node_columns = ["id", "label", "properties", "embedding"]
             node_values = []
             for n in nodes:
-                props_val = json.dumps(n["properties"]) if isinstance(n["properties"], dict) else n["properties"]
-                node_values.append([n["id"], n["label"], props_val])
+                props_dict = n["properties"] if isinstance(n["properties"], dict) else {}
+                props_val = json.dumps(props_dict) if isinstance(n["properties"], dict) else n["properties"]
+                
+                # Extract text for Gemini embedding generation
+                body_text = props_dict.get("body", "") or props_dict.get("name", "") or str(n["id"])
+                embedding_vec = generate_text_embedding(body_text)
+
+                node_values.append([n["id"], n["label"], props_val, embedding_vec])
 
             if node_values:
                 transaction.insert_or_update(
@@ -74,6 +82,66 @@ class SpannerGraphService:
 
         db.run_in_transaction(_transaction_work)
         return {"nodes_count": len(nodes), "edges_count": len(edges)}
+
+    def search_full_text(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        """
+        Full Text Search using Spanner SEARCH(body_tokens, query) index.
+        """
+        db = self.get_database()
+        sql = """
+        SELECT id, label, JSON_VALUE(properties, '$.id') AS concept_id, JSON_VALUE(properties, '$.name') AS name
+        FROM GraphNode
+        WHERE SEARCH(body_tokens, @query)
+        LIMIT @limit
+        """
+        params = {"query": query, "limit": limit}
+        param_types = {
+            "query": spanner.param_types.STRING,
+            "limit": spanner.param_types.INT64,
+        }
+        results = []
+        with db.snapshot() as snapshot:
+            rows = snapshot.execute_sql(sql, params=params, param_types=param_types)
+            for row in rows:
+                results.append({
+                    "id": row[0],
+                    "label": row[1],
+                    "concept_id": row[2],
+                    "name": row[3],
+                })
+        return results
+
+    def search_vector(self, query_text: str, limit: int = 10) -> list[dict[str, Any]]:
+        """
+        Vector Search using Spanner ScaNN Vector Index (GraphNodeVectorIndex) with Cosine Distance.
+        """
+        db = self.get_database()
+        query_vec = generate_text_embedding(query_text)
+        sql = """
+        SELECT id, label, JSON_VALUE(properties, '$.id') AS concept_id, JSON_VALUE(properties, '$.name') AS name,
+               COSINE_DISTANCE(embedding, @query_vec) AS distance
+        FROM GraphNode
+        WHERE embedding IS NOT NULL
+        ORDER BY distance ASC
+        LIMIT @limit
+        """
+        params = {"query_vec": query_vec, "limit": limit}
+        param_types = {
+            "query_vec": spanner.param_types.Array(spanner.param_types.FLOAT64),
+            "limit": spanner.param_types.INT64,
+        }
+        results = []
+        with db.snapshot() as snapshot:
+            rows = snapshot.execute_sql(sql, params=params, param_types=param_types)
+            for row in rows:
+                results.append({
+                    "id": row[0],
+                    "label": row[1],
+                    "concept_id": row[2],
+                    "name": row[3],
+                    "distance": row[4],
+                })
+        return results
 
     def fetch_node_labels(self) -> dict[str, Any]:
         """

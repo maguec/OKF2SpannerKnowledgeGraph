@@ -1,14 +1,51 @@
-# Spanner Graph Sample Queries for OKF Knowledge Graph
+# Spanner Graph & Search Sample Queries for OKF Knowledge Graph
 
-This document provides sample **Spanner Graph (GQL)** queries to inspect, traverse, and visualize the OKF Knowledge Graph (`OKFGraph`) created in Google Cloud Spanner.
+This document provides sample **Spanner Graph (GQL)**, **Full Text Search (FTS)**, and **ScaNN Vector Search** queries to inspect, search, and traverse the OKF Knowledge Graph (`OKFGraph`) created in Google Cloud Spanner.
 
 > **Note on Schema & Primary Keys**:
 > - `GraphNode.id`, `GraphEdge.id`, `GraphEdge.dest_id`, and `GraphEdge.edge_id` are formatted as **UUIDv4 (`STRING(36)`)**.
-> - Human-readable concept strings (e.g. `'spanner-graph'`), concept names, and metadata remain accessible inside the `properties` JSON column.
+> - Full Text Search index: `GraphNodeSearchIndex` on `body_tokens` (`TOKENLIST`).
+> - Vector Search index: `GraphNodeVectorIndex` (ScaNN index with `COSINE` distance) on `embedding` (`ARRAY<FLOAT64>(vector_length=>768)` generated via Gemini `text-embedding-004`).
 
 ---
 
-## 1. List All Nodes in the Knowledge Graph
+## 1. Full Text Search Query (`SEARCH`)
+
+Perform full text keyword search on node body text using Spanner `SEARCH(body_tokens, query)` index.
+
+```sql
+SELECT 
+  id AS node_uuid,
+  label AS node_type,
+  JSON_VALUE(properties, '$.id') AS concept_id,
+  JSON_VALUE(properties, '$.name') AS concept_name
+FROM GraphNode
+WHERE SEARCH(body_tokens, 'Spanner OR Graph')
+LIMIT 10;
+```
+
+---
+
+## 2. ScaNN Vector Search Query (`COSINE_DISTANCE`)
+
+Perform semantic similarity vector search using 768-dimensional Gemini embeddings and Spanner ScaNN `GraphNodeVectorIndex`.
+
+```sql
+SELECT 
+  id AS node_uuid,
+  label AS node_type,
+  JSON_VALUE(properties, '$.id') AS concept_id,
+  JSON_VALUE(properties, '$.name') AS concept_name,
+  COSINE_DISTANCE(embedding, @query_vec) AS distance
+FROM GraphNode
+WHERE embedding IS NOT NULL
+ORDER BY distance ASC
+LIMIT 5;
+```
+
+---
+
+## 3. List All Nodes in the Knowledge Graph
 
 Fetch all graph nodes with their UUIDv4 primary keys, dynamic labels, and concept properties.
 
@@ -25,7 +62,7 @@ ORDER BY concept_id;
 
 ---
 
-## 2. Retrieve All Relationships / Edges
+## 4. Retrieve All Relationships / Edges
 
 Query all directed edges (`LINKS_TO`) between source and destination concepts.
 
@@ -44,7 +81,7 @@ ORDER BY source_concept;
 
 ---
 
-## 3. Find Outgoing and Incoming Links for a Specific Concept
+## 5. Find Outgoing and Incoming Links for a Specific Concept
 
 Search for all outgoing links from `spanner-graph` or incoming backlinks to `kg-architecture`.
 
@@ -72,7 +109,7 @@ RETURN
 
 ---
 
-## 4. Multi-Hop Graph Path Traversal
+## 6. Multi-Hop Graph Path Traversal
 
 Traverse connected paths (up to 3 hops) between concepts in the knowledge graph.
 
@@ -87,7 +124,7 @@ RETURN
 
 ---
 
-## 5. Most Connected Concepts (Out-Degree Aggregation)
+## 7. Most Connected Concepts (Out-Degree Aggregation)
 
 Count the number of outgoing links per concept to identify central node hubs in the graph.
 
@@ -101,28 +138,4 @@ RETURN
   COUNT(e) AS outgoing_links_count
 GROUP BY concept_id, concept_name
 ORDER BY outgoing_links_count DESC;
-```
-
----
-
-## 6. Standard SQL Query Fallback
-
-You can also run standard relational Spanner SQL directly on the underlying `GraphNode` and `GraphEdge` tables:
-
-```sql
-SELECT 
-  n.id AS node_uuid,
-  n.label AS node_type,
-  JSON_VALUE(n.properties, '$.id') AS concept_id,
-  JSON_VALUE(n.properties, '$.name') AS concept_name
-FROM GraphNode n;
-
-SELECT 
-  e.id AS source_node_uuid,
-  e.dest_id AS target_node_uuid,
-  e.edge_id AS edge_uuid,
-  e.label AS relationship,
-  JSON_VALUE(e.properties, '$.type') AS link_type,
-  JSON_VALUE(e.properties, '$.text') AS link_text
-FROM GraphEdge e;
 ```

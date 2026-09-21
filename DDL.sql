@@ -2,6 +2,8 @@ CREATE TABLE GraphNode (
   id STRING(36) NOT NULL,
   label STRING(MAX) NOT NULL,
   properties JSON,
+  body_tokens TOKENLIST AS (TOKENIZE_FULLTEXT(JSON_VALUE(properties, '$.body'))) HIDDEN,
+  embedding ARRAY<FLOAT64>(vector_length=>768),
 ) PRIMARY KEY (id);
 
 CREATE TABLE GraphEdge (
@@ -26,3 +28,11 @@ CREATE PROPERTY GRAPH OKFGraph
       DYNAMIC LABEL (label)
       DYNAMIC PROPERTIES (properties)
   );
+
+-- Spanner Full Text Search Index
+CREATE SEARCH INDEX GraphNodeSearchIndex ON GraphNode(body_tokens);
+
+-- Spanner ScaNN Vector Search Index (Gemini text-embedding-004 768-dim)
+CREATE VECTOR INDEX GraphNodeVectorIndex ON GraphNode(embedding) 
+WHERE embedding IS NOT NULL 
+OPTIONS (distance_type = 'COSINE');
