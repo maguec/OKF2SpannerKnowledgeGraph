@@ -12,8 +12,8 @@ load_dotenv()
 
 app = FastAPI(
     title="OKF v2 to Spanner Knowledge Graph API",
-    description="FastAPI service for parsing valid OKF v2 files, populating Spanner Graph, Full Text Search, and ScaNN Vector Search.",
-    version="0.2.0",
+    description="FastAPI service for parsing valid OKF v2 files, populating Spanner Graph with HAS_TAGS, HAS_REFERENCE, and HAS_LINKS relationships, Full Text Search, and ScaNN Vector Search.",
+    version="0.3.0",
 )
 
 spanner_service = SpannerGraphService()
@@ -47,7 +47,12 @@ def read_root():
         "indexes": {
             "fts_index": "GraphNodeSearchIndex",
             "vector_index": "GraphNodeVectorIndex (ScaNN)",
-            "embedding_model": "text-embedding-004 (768-dim)",
+            "embedding_model": "text-embedding-004 (768-dim, vectorizes title + description + body)",
+        },
+        "graph_relationships": {
+            "tags": "HAS_TAGS -> Tag",
+            "references": "HAS_REFERENCE -> Source",
+            "links": "HAS_LINKS -> Concept/Node",
         }
     }
 
@@ -89,7 +94,7 @@ def ingest_okf(payload: OKFDocumentPayload):
             },
         )
 
-    nodes = [res["node"]] if res["node"] else []
+    nodes = res.get("nodes", [res["node"]] if res["node"] else [])
     edges = res["edges"]
 
     try:
@@ -112,7 +117,7 @@ def ingest_okf(payload: OKFDocumentPayload):
 @app.post("/okf/ingest-files", response_model=IngestResponse)
 async def ingest_okf_files(files: list[UploadFile] = File(...)):
     """
-    Upload multiple OKF v2 markdown files, parse, validate, and populate Spanner Graph with Gemini embeddings.
+    Upload multiple OKF v2 markdown files, parse, validate, and populate Spanner Graph.
     """
     all_nodes = []
     all_edges = []
@@ -128,7 +133,9 @@ async def ingest_okf_files(files: list[UploadFile] = File(...)):
         if not res["valid"]:
             failed_files.append({"filename": file.filename, "findings": res["findings"]})
         else:
-            if res["node"]:
+            if res.get("nodes"):
+                all_nodes.extend(res["nodes"])
+            elif res["node"]:
                 all_nodes.append(res["node"])
             all_edges.extend(res["edges"])
             all_findings.extend(res["findings"])

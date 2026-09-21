@@ -18,12 +18,13 @@ def main():
         print(f"\nProcessing {file_path}:")
         print(f"  Valid: {res['valid']}")
         print(f"  Node ID: {res['node']['id']} ({res['node']['properties']['id']})")
+        print(f"  Total Nodes generated (concept + tags + sources): {len(res.get('nodes', []))}")
         print(f"  Edges extracted: {len(res['edges'])}")
         for e in res['edges']:
-            print(f"    - {e['properties']['source_id']} -> {e['properties']['dest_id']} ({e['properties']['type']})")
+            print(f"    - {e['properties'].get('source_id')} --[{e['label']}]--> {e['properties'].get('dest_id')}")
         
         if res["valid"]:
-            all_nodes.append(res["node"])
+            all_nodes.extend(res.get("nodes", [res["node"]]))
             all_edges.extend(res["edges"])
 
     print(f"\nTotal Nodes to write: {len(all_nodes)}")

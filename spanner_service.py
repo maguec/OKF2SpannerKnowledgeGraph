@@ -47,9 +47,14 @@ class SpannerGraphService:
                 props_dict = n["properties"] if isinstance(n["properties"], dict) else {}
                 props_val = json.dumps(props_dict) if isinstance(n["properties"], dict) else n["properties"]
                 
-                # Extract text for Gemini embedding generation
-                body_text = props_dict.get("body", "") or props_dict.get("name", "") or str(n["id"])
-                embedding_vec = generate_text_embedding(body_text)
+                # Extract title, description, and body text for Gemini embedding generation
+                title_text = props_dict.get("name", "") or props_dict.get("title", "")
+                desc_text = props_dict.get("description", "")
+                body_text = props_dict.get("body", "")
+
+                text_to_embed = f"{title_text}\n{desc_text}\n{body_text}".strip() or str(n["id"])
+                embedding_vec = generate_text_embedding(text_to_embed)
+
 
                 node_values.append([n["id"], n["label"], props_val, embedding_vec])
 
